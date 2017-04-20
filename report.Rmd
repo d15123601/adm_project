@@ -12,5 +12,101 @@ knitr::opts_chunk$set(echo = TRUE)
 # SSPL9076 Report
 ## Michael O Donnell D15123601
 
-### Introduction
+### 1. Introduction
+
+This report outlines the process of setting up a cloud hosted, spatially enabled database for use by
+an Emergency Service. The database has the following extensions enabled:
+
+* postgis; to enable spatial functions
+* postgis_topology; to enable topological functions
+* pg_routing; to enable routing functions
+* hstore; to enable use of tags in a single database column - facilitates simple table structures
+while maintaining all the information in a feature.
+
+The benefits of using a cloud-based server to deliver information include;
+
+* distributed computing - more powerful resources may be available on the server side, meaning that
+complex queries will run faster (for example, when accessing the database via a smart-phone)
+* multiple users running concurrently
+* ability to access at any time or place
+
+The first section of this report will outline the steps taken in setting up the database. Then the 
+data storage choices taken will be discussed, followed by a review of the UML diagram for the 
+project. The spatial queries used to achieve the functional objectives will then be shown. A brief 
+conclusion will close the report.
+
+### 2. Database Build
+
+The database software chosen for this project was [postgresql](https://www.postgresql.org/). This is
+an fully open source system, with huge popularity and therefore massive support and documentation. A
+multitude of extensions have been written for postgresql, and some of these are leveraged within 
+this project. It also has some unique features, not available in any other database technology. The 
+package QGIS, a free and open source GIS application was written specifically with interaction with 
+postgresql in mind. 
+
+The cloud server provider chosen was [Okeanos](https://okeanos.grnet.gr/home/), a Greece-based 
+'Infrastructure as a Service' solution, specifically aimed at educational users. The main reason it 
+was used is that it is free for educational purposes. There was some issues with respect to the 
+availability of the service, and the speed of connection. For this reason, once the database was up 
+and running on the Okeanos platform, it was replicated to a local environment, and all the design 
+work was carried out on this, with the intention to replicate it back to the cloud server.
+
+A virtual machine was created on the Okeanos Global platform, which had the following 
+specifications:
+
+Item			  |Detail
+------------|----------------------  
+CPU Count		|2  
+RAM				  |2 GB  
+Hard Drive	|40 GB  
+OS				  |Ubuntu Desktop  
+
+The application [Putty](http://www.chiark.greenend.org.uk/~sgtatham/putty/) was downloaded to allow
+access to the Linux commmand line, whuch was used to install all of the software and data required.
+ 
+The following script was then used for the installation:
+
+```{r eval = FALSE}
+sudo apt-get install postgresql-contrib-9.3
+sudo add-apt-repository ppa:georepublic/pgrouting
+sudo apt-get update
+sudo apt-get install postgresql-9.3-pgrouting
+
+IN pgADMIN (all extensions loaded):
+CREATE EXTENSION postgis;
+CREATE EXTENSION postgis_topology;
+CREATE EXTENSION hstore;
+CREATE EXTENSION pgrouting;
+
+
+In PuTTY (OSM data ready for routing:
+wget https://s3.amazonaws.com/metro-extracts.mapzen.com/dublin_ireland.osm.bz2
+bunzip2 dublin_ireland.osm.bz2
+sudo apt-get install osm2pgsql
+
+osm2pgsql -j -H 83.212.82.138 -U postgres -W -d "AdvanSpatal" -p osm dublin_ireland.osm --cache-strategy sparse
+
+sudo apt-get install osm2pgrouting
+osm2pgrouting -f dublin_ireland.osm -c /usr/share/osm2pgrouting/mapconfig.xml -h 83.212.82.138 -d  "AdvanSpatal" -U postgres -W postgres
+
+Use Command Prompt (1st doanload shapefiles you need - say counties on E:\a folder):
+
+E:\a\Census2011_Admin_Counties_generalised20m.shp county > E:\a\county.sql
+shp2pgsql -s 29900 -W "LATIN1" -I 
+
+psql -h YOUR_IP_GOES_HERE -U postgres -d YOUR_DB_NAME -f e:\a\county.sql
+
+
+shp2pgsql -s 29900 -W "LATIN1" -I <file path and name here>
+
+shp2pgsql -s 29900 -W "LATIN1" -I <file path and name here>
+
+shp2pgsql -s 29900 -W "LATIN1" -I <file path and name here>
+
+psql -h 83.212.82.138 -U postgres -d "AdvanSpatal" -f <file path and name here>
+
+psql -h 83.212.82.138 -U postgres -d "AdvanSpatal" -f <file path and name here>
+
+psql -h 83.212.126.24 -U postgres -d ADMSP -f <file path and name here>
+```
 
