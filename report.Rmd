@@ -5,10 +5,6 @@ date: "April 18, 2017"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
 # SSPL9076 Report
 ## Michael O Donnell D15123601
 
@@ -72,14 +68,12 @@ sudo add-apt-repository ppa:georepublic/pgrouting
 sudo apt-get update
 sudo apt-get install postgresql-9.3-pgrouting
 
-IN pgADMIN (all extensions loaded):
 CREATE EXTENSION postgis;
 CREATE EXTENSION postgis_topology;
 CREATE EXTENSION hstore;
 CREATE EXTENSION pgrouting;
 
 
-In PuTTY (OSM data ready for routing:
 wget https://s3.amazonaws.com/metro-extracts.mapzen.com/dublin_ireland.osm.bz2
 bunzip2 dublin_ireland.osm.bz2
 sudo apt-get install osm2pgsql
@@ -87,14 +81,13 @@ sudo apt-get install osm2pgsql
 osm2pgsql -j -H 83.212.82.138 -U postgres -W -d "AdvanSpatal" -p osm dublin_ireland.osm --cache-strategy sparse
 
 sudo apt-get install osm2pgrouting
-osm2pgrouting -f dublin_ireland.osm -c /usr/share/osm2pgrouting/mapconfig.xml -h 83.212.82.138 -d  "AdvanSpatal" -U postgres -W postgres
 
-Use Command Prompt (1st doanload shapefiles you need - say counties on E:\a folder):
+osm2pgrouting -f dublin_ireland.osm -c /usr/share/osm2pgrouting/mapconfig.xml -h 83.212.82.138 -d  "AdvanSpatal" -U postgres -W postgres
 
 E:\a\Census2011_Admin_Counties_generalised20m.shp county > E:\a\county.sql
 shp2pgsql -s 29900 -W "LATIN1" -I 
 
-psql -h YOUR_IP_GOES_HERE -U postgres -d YOUR_DB_NAME -f e:\a\county.sql
+psql -h <your IP here> -U postgres -d YOUR_DB_NAME -f e:\a\county.sql
 
 
 shp2pgsql -s 29900 -W "LATIN1" -I <file path and name here>
@@ -103,10 +96,388 @@ shp2pgsql -s 29900 -W "LATIN1" -I <file path and name here>
 
 shp2pgsql -s 29900 -W "LATIN1" -I <file path and name here>
 
-psql -h 83.212.82.138 -U postgres -d "AdvanSpatal" -f <file path and name here>
+psql -h <your IP here> -U postgres -d "AdvanSpatal" -f <file path and name here>
 
-psql -h 83.212.82.138 -U postgres -d "AdvanSpatal" -f <file path and name here>
+psql -h <your IP here> -U postgres -d "AdvanSpatal" -f <file path and name here>
 
-psql -h 83.212.126.24 -U postgres -d ADMSP -f <file path and name here>
+psql -h <your IP here> -U postgres -d ADMSP -f <file path and name here>
 ```
 
+A GIS was used to connnect to the database and verify that all tables has loaded correctly. 
+Some processing was required to have all the data in the same projection. The projection
+chosen for the project was EPSG:2157, Irish Transverse Mercator. The queries to perform this are 
+shown below;
+
+```
+ALTER TABLE osm_line
+	ALTER COLUMN way
+	TYPE Geometry(LineString, 2157)
+	USING ST_Transform(way, 2157);
+
+ALTER TABLE osm_point
+	ALTER COLUMN way
+	TYPE Geometry(Point, 2157)
+	USING ST_Transform(way, 2157);
+
+ALTER TABLE osm_polygon
+	ALTER COLUMN way
+	TYPE Geometry(geometry, 2157)
+	USING ST_Transform(way, 2157);
+
+ALTER TABLE osm_roads
+	ALTER COLUMN way
+	TYPE Geometry(LineString, 2157)
+	USING ST_Transform(way, 2157);
+
+ALTER TABLE ways
+	ALTER COLUMN the_geom
+	TYPE Geometry(LineString, 2157)
+	USING ST_Transform(the_geom, 2157);
+
+ALTER TABLE ways_vertices_pgr
+	ALTER COLUMN the_geom
+	TYPE Geometry(Point, 2157)
+	USING ST_Transform(the_geom, 2157);
+
+ALTER TABLE sas
+	ALTER COLUMN geom
+	TYPE Geometry(MultiPolygon, 2157)
+	USING ST_Transform(geom, 2157);
+
+ALTER TABLE counties
+	ALTER COLUMN geom
+	TYPE Geometry(MultiPolygon, 2157)
+	USING ST_Transform(geom, 2157);
+
+ALTER TABLE eds
+	ALTER COLUMN geom
+	TYPE Geometry(MultiPolygon, 2157)
+	USING ST_Transform(geom, 2157);
+
+ALTER TABLE osm_nodes
+	ALTER COLUMN the_geom
+	TYPE Geometry(Point, 2157)
+	USING ST_Transform(the_geom, 2157);
+
+```
+The Open Street Map sourced data was projected from WGS84, and the CSO data was projected from 
+EPSG:29902, Irish Grid.
+
+Finally, a user was setup with priveleges to create, read, update and delete using the queries below;
+
+```
+CREATE ROLE ext_user ;
+CREATE ROLE int_user SUPERUSER;
+```
+By default, the role SUPERUSER has all the aforementioned priveleges.
+
+
+### 3. Data Storage
+
+Data from Open Street Map uses the hstore extension to allow storage of extra attribute information
+in a column called 'tags'. For each of our geometry tables, we need to extract features relevant to
+our application, and build a structure suitable to store them. Relevant tags were selected and then
+features were selected that contained non-null values of these tags. These were transferred to
+'feature_of_interest' tables. 
+
+It was decided that the application being built for this project would be for an ambulance service. 
+The most critical emergencies that ambulances respond to are thsoe where cardiac arrest has occured.
+Sun et al (2017) reviewed emergency repsonse records for the city of Seattle, and identified 
+'hotspot' categories of places that should be considered as cost effective placement locations for 
+defibrillator placement. It is logical to extend this model to create a database of locations for
+ambulance emergency response. The general breakdown of these locations is that they are all public
+locations, with either a high throughput of people (public transport hubs, theatres etc.), or else with inherent 
+special risks (swimming pools, sports centres etc.).
+
+The code used for the process of extracting and tabulating these locations is shown below.
+
+```
+CREATE TABLE poly_oi AS
+SELECT osm_id, amenity, building, way, tags 
+FROM osm_polygon
+WHERE amenity IN ('doctors', 'police', 'townhall',
+		  'school','social_facility','social_centre',
+		  'pub', 'courthouse', 'cinema', 'restaurant', 
+		  'childcare', 'bar', 'music venue', 
+		  'place_of_worship', 'marketplace', 'nightclub',
+		  'university', 'hospital', 'swimming_pool', 'hospice',
+		  'dentist', 'hall', 'public_building', 'bus_station', 
+		  'post_office', 'doctors', 'internet_cafe', 'health clinic',
+		  'prison', 'healthcare', 'pharmacy', 'deli & bistro', 'gym',
+		  'dojo', 'shop', 'nursing_home', 'college', 'creche', 'theatre',
+		  'pub;restaurant', 'library', 'school', 'clinic', 'kindergarten')
+OR building = 'industrial';
+
+-- same for points..
+
+CREATE TABLE point_oi AS
+SELECT osm_id, amenity, building, way, tags 
+FROM osm_point
+WHERE amenity IN ('doctors', 'police', 'townhall',
+		  'school','social_facility','social_centre',
+		  'pub', 'courthouse', 'cinema', 'restaurant', 
+		  'childcare', 'bar', 'music venue', 
+		  'place_of_worship', 'marketplace', 'nightclub',
+		  'university', 'hospital', 'swimming_pool', 'hospice',
+		  'dentist', 'hall', 'public_building', 'bus_station', 
+		  'post_office', 'doctors', 'internet_cafe', 'health clinic',
+		  'prison', 'healthcare', 'pharmacy', 'deli & bistro', 'gym',
+		  'dojo', 'shop', 'nursing_home', 'college', 'creche', 'theatre',
+		  'pub;restaurant', 'library', 'school', 'clinic', 'kindergarten')
+OR building = 'industrial';
+
+-- the line data is a bit more obscure. Let's select the Luas lines, bus routes, 
+-- train routes and walking trails
+
+CREATE TABLE line_oi AS
+SELECT osm_id, route, railway, waterway, tags, way
+FROM osm_line
+WHERE
+route IN ('bus', 'hiking', 'train', 'bicycle')
+OR railway IN ('tram','rail')
+OR waterway IN ('canal', 'weir', 'river', 'lock gate', 'riverbank', 'stream');
+
+/* the next step is to coalesce the tags into columns that might be of use 
+   first we'll select some..
+
+   In line_oi we have 5283 rows.
+   The tag 'ref' lists the route number. We'll keep this.
+   The tag 'Operator lists the operator. We'll keep this also.
+*/
+
+-- first lets create two new columns
+
+ALTER TABLE line_oi
+ADD COLUMN route_number text;
+
+ALTER TABLE line_oi
+ADD COLUMN route_operator text;
+
+ALTER TABLE line_oi
+ADD COLUMN feature_name text;
+
+UPDATE line_oi
+SET route_number = tags -> 'ref'
+
+UPDATE line_oi
+SET route_operator = tags -> 'operator'
+
+UPDATE line_oi
+SET feature_name = tags -> 'name'
+
+-- we have three new columns with the route number, route operator and the feature name
+-- for waterways. We can now drop the hstore column
+
+ALTER TABLE line_oi
+DROP COLUMN tags;
+
+-- we now repeat the process for the other two *_oi tables..
+
+/* 
+   In point_oi we have 2084 rows.
+   The tag 'name' lists the featue name. We'll keep this.
+   The tag 'operator' lists the operator. We'll keep this also.
+*/
+
+ALTER TABLE point_oi
+ADD COLUMN place_operator text;
+
+ALTER TABLE point_oi
+ADD COLUMN feature_name text;
+
+UPDATE point_oi
+SET place_operator = tags -> 'operator';
+
+UPDATE point_oi
+SET feature_name = tags -> 'name';
+
+-- drop the hstore..
+
+ALTER TABLE point_oi
+DROP COLUMN tags;
+
+/* 
+   In poly_oi we have 2524 rows.
+   The tag 'name' lists the featue name. We'll keep this.
+   The tag 'operator' lists the operator. We'll keep this also.
+*/
+
+ALTER TABLE poly_oi
+ADD COLUMN place_operator text;
+
+ALTER TABLE poly_oi
+ADD COLUMN feature_name text;
+
+UPDATE poly_oi
+SET place_operator = tags -> 'operator';
+
+UPDATE poly_oi
+SET feature_name = tags -> 'name';
+
+-- drop the hstore..
+
+ALTER TABLE poly_oi
+DROP COLUMN tags;
+```
+
+One of the required capabilites of the database was that it would be possible to run a spatial query
+and return all objects related to that query - for example, a ST_Contains query should return point,
+line and polygon geometries when one table is queried. The available data structures were
+heterogeonous, homogenous and inheritance. Information on the features of each of these methods was 
+found in 'PostGIS in Action, Second Edition' and is outlined below.
+
+#### 3.1 Heterogenous
+In this structure, a single table is used to contain all objects, using a generic 'geometry' column 
+to store the geometry. A query can be run on one table and it will return all geometries meeting the
+criteria. It is simple to create and in structure. However, data integrity can be hard to maintain, 
+it can cause problems when using external applications to render or access data. Also, if all of 
+your data is contained in one table, querying within the table will necessitate multiple self-joins,
+meaning complex queries need to be written, and large overhead for the processor.
+
+#### 3.2 Homogenous
+Here, seperate columns are used in a table to contain disparate geometry types. This is suitable 
+when the type of geometry is of specific interest to the user querying the database. This allows 
+consistency and prohibits mixing of geometry types. It also allows for efficient data storage 
+techniques, especially when dealing with large amounts of data, as the tables can be aloocated over 
+multiple physical disks. However, use of third party applications may necessitate additional 
+processing steps if the application in question only supports one geometry column. The downsides 
+are that queries reurning multiple geometry types have to be UNION type queries, and that having 
+multiple geometry columns can lead to performance inhibition on both SELECT and UPDATE queries.
+
+#### 3.3 Inheritance
+Inheritance brings the flexibility of heterogenous design together with the strucutre of homogenous
+design. It is more involved to setup however. In this structure, a parent table is created with columns 
+that are common to all the child tables. The child tables are then set up with their specific columns,
+and inherit the columns from the parent table. When the parent table is queried, all child tables that 
+meet the query criteria are returned with the columns specific to the parent. If the child table is 
+queried directly, all columns from that table are returned. Inhertiance can be set and unset on the fly,
+enhancing bulk data loading speed. Disadvantages to this structure are that inheritance may not be
+supported by third party or other database solutions. Rules need to be sued to enforce the integrity of
+the data structure; for example when updating or deleting from the parent or child.
+
+The code used to establish the inheritance structure is shown below. The query was based on code found
+in 'PostGIS in Action, Second Edition'.
+
+```
+CREATE TABLE public.super_poi(
+oid SERIAL NOT NULL,
+geom geometry);
+
+ALTER TABLE public.super_poi
+ADD CONSTRAINT enfore_srid_geom CHECK (st_srid(geom) = 2157);
+
+ALTER TABLE public.super_poi
+ADD CONSTRAINT oid_pk PRIMARY KEY (oid);
+
+/* next we create the individual child tables. This process is documented in
+   POSTgis IN ACTION, p. 66 - 67
+*/
+
+ALTER TABLE line_oi
+ADD COLUMN gid serial;
+
+CREATE TABLE public.dublin_line(
+oid integer,
+osm_id bigint,
+route text, 
+railway text, 
+waterway text, 
+route_number text,
+route_operator text,
+feature_name text,
+CONSTRAINT dublin_line_pk PRIMARY KEY (oid)
+)
+INHERITS (public.super_poi);
+	
+-- disinherit to allow bulk update - not particularly needed but good practise
+
+ALTER TABLE public.dublin_line NO INHERIT public.super_poi;
+
+-- bulk load
+
+INSERT INTO public.dublin_line( -- note order of fields..
+osm_id, route, railway, waterway, geom, route_number, route_operator, feature_name, oid)
+SELECT * FROM line_oi;
+
+-- the above update has an issue - the osm-id for the route field is non-unique for 
+-- all of the public transport lines. Let's add a unique sequential filed for each 
+-- record and use that as the pk. (done above)
+
+ALTER TABLE public.dublin_line INHERIT public.super_poi;
+
+-- do the same for the point and poly tables...
+--------------------------------------------------------------------------------------
+ALTER TABLE poly_oi
+ADD COLUMN gid serial;
+
+CREATE TABLE public.dublin_poly(
+oid integer,
+osm_id bigint,
+amenity text, 
+building text,
+place_operator text,
+feature_name text,
+CONSTRAINT dublin_poly_pk PRIMARY KEY (oid)
+)
+INHERITS (public.super_poi);
+	
+-- disinherit to allow bulk update - not particularly needed but good practise
+
+ALTER TABLE public.dublin_poly NO INHERIT public.super_poi;
+
+-- bulk load
+
+INSERT INTO public.dublin_poly( -- note order of fields..
+osm_id, amenity, building, geom, place_operator, feature_name, oid)
+SELECT * FROM poly_oi;
+
+ALTER TABLE public.dublin_poly INHERIT public.super_poi;
+
+-----------------------------------------------------------------------------------
+
+ALTER TABLE point_oi
+ADD COLUMN gid serial;
+
+CREATE TABLE public.dublin_point(
+oid integer,
+osm_id bigint,
+amenity text, 
+building text,
+place_operator text,
+feature_name text,
+CONSTRAINT dublin_point_pk PRIMARY KEY (oid)
+)
+INHERITS (public.super_poi);
+	
+-- disinherit to allow bulk update - not particularly needed but good practise
+
+ALTER TABLE public.dublin_point NO INHERIT public.super_poi;
+
+-- bulk load
+
+INSERT INTO public.dublin_point( -- note order of fields..
+osm_id, amenity, building, geom, place_operator, feature_name, oid)
+SELECT * FROM point_oi;
+
+
+ALTER TABLE public.dublin_point INHERIT public.super_poi;
+
+-- At this point, we have a super table with two columns, a primary key which doesn't have unique values
+-- I'm unsure whether this will effect our results..
+-- maybe add a geom_type column to the super_table?
+
+ALTER TABLE super_poi
+ADD COLUMN geom_type text;
+
+UPDATE super_poi
+SET geom_type = (
+SELECT ST_GeometryType(geom)
+FROM super_poi);
+
+```
+
+## References
+
+Obe, R. O. and Hsu, L. S. (2015) PostGIS in action. Available at: https://www.manning.com/books/postgis-in-action-second-edition?a_bid=5e00124f&a_aid=PostGISInAction (Accessed: 20 April 2017).
+
+Sun, C. L. F., Brooks, S. C., Morrison, L. J. and Chan, T. C. Y. (2017) ‘Ranking Businesses and Municipal Locations by Spatiotemporal Cardiac Arrest Risk to Guide Public Defibrillator PlacementClinical Perspective’, Circulation. American Heart Association, Inc., 135(12), pp. 1104–1119. doi: 10.1161/CIRCULATIONAHA.116.025349.
